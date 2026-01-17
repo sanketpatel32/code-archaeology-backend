@@ -10,6 +10,24 @@ const DEFAULT_BRANCHES = 6;
 const MAX_BRANCHES = 12;
 const DEFAULT_WEEKS = 24;
 const MAX_WEEKS = 104;
+const COMMIT_CLASSIFICATION_SQL = `CASE
+  WHEN classification = 'bugfix' THEN 'fix'
+  WHEN classification = 'feature' THEN 'feat'
+  WHEN classification = 'maintenance' THEN 'build'
+  WHEN classification <> 'unknown' THEN classification
+  WHEN lower(message) ~ '^(feat|feature)(\\([^)]+\\))?!?:' THEN 'feat'
+  WHEN lower(message) ~ '^(fix|bugfix)(\\([^)]+\\))?!?:' THEN 'fix'
+  WHEN lower(message) ~ '^(docs|doc)(\\([^)]+\\))?!?:' THEN 'docs'
+  WHEN lower(message) ~ '^(style|styles)(\\([^)]+\\))?!?:' THEN 'style'
+  WHEN lower(message) ~ '^(refactor)(\\([^)]+\\))?!?:' THEN 'refactor'
+  WHEN lower(message) ~ '^(perf)(\\([^)]+\\))?!?:' THEN 'perf'
+  WHEN lower(message) ~ '^(test|tests)(\\([^)]+\\))?!?:' THEN 'test'
+  WHEN lower(message) ~ '^(build)(\\([^)]+\\))?!?:' THEN 'build'
+  WHEN lower(message) ~ '^(ci)(\\([^)]+\\))?!?:' THEN 'ci'
+  WHEN lower(message) ~ '^(revert)(\\([^)]+\\))?!?:' THEN 'revert'
+  WHEN lower(message) ~ '^(chore)(\\([^)]+\\))?!?:' THEN 'chore'
+  ELSE 'unknown'
+END`;
 
 function parseLimit(value: unknown, fallback = DEFAULT_LIMIT): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -286,7 +304,13 @@ export async function repositoryRoutes(app: FastifyInstance) {
         message: string;
         classification: string;
       }>(
-        `SELECT sha, author_name, author_email, committed_at, message, classification
+        `SELECT
+            sha,
+            author_name,
+            author_email,
+            committed_at,
+            message,
+            ${COMMIT_CLASSIFICATION_SQL} AS classification
          FROM commits
          WHERE repository_id = $1
            AND ($2::timestamptz IS NULL OR committed_at < $2)
@@ -572,26 +596,32 @@ export async function repositoryRoutes(app: FastifyInstance) {
           chore: number;
           unknown: number;
         }>(
-          `SELECT
-              date_trunc('week', committed_at) AS bucket,
-              SUM(CASE WHEN classification IN ('feat', 'feature') THEN 1 ELSE 0 END)::int AS feat,
-              SUM(CASE WHEN classification IN ('fix', 'bugfix') THEN 1 ELSE 0 END)::int AS fix,
-              SUM(CASE WHEN classification = 'docs' THEN 1 ELSE 0 END)::int AS docs,
-              SUM(CASE WHEN classification = 'style' THEN 1 ELSE 0 END)::int AS style,
-              SUM(CASE WHEN classification = 'refactor' THEN 1 ELSE 0 END)::int AS refactor,
-              SUM(CASE WHEN classification = 'perf' THEN 1 ELSE 0 END)::int AS perf,
-              SUM(CASE WHEN classification = 'test' THEN 1 ELSE 0 END)::int AS test,
-              SUM(CASE WHEN classification IN ('build', 'maintenance') THEN 1 ELSE 0 END)::int AS build,
-              SUM(CASE WHEN classification = 'ci' THEN 1 ELSE 0 END)::int AS ci,
-              SUM(CASE WHEN classification = 'revert' THEN 1 ELSE 0 END)::int AS revert,
-              SUM(CASE WHEN classification = 'chore' THEN 1 ELSE 0 END)::int AS chore,
-              SUM(CASE WHEN classification = 'unknown' THEN 1 ELSE 0 END)::int AS unknown
-           FROM commits
-           WHERE repository_id = $1
+          `WITH classified AS (
+              SELECT
+                date_trunc('week', committed_at) AS bucket,
+                ${COMMIT_CLASSIFICATION_SQL} AS classification_effective
+              FROM commits
+              WHERE repository_id = $1
+           )
+           SELECT
+              bucket,
+              SUM(CASE WHEN classification_effective = 'feat' THEN 1 ELSE 0 END)::int AS feat,
+              SUM(CASE WHEN classification_effective = 'fix' THEN 1 ELSE 0 END)::int AS fix,
+              SUM(CASE WHEN classification_effective = 'docs' THEN 1 ELSE 0 END)::int AS docs,
+              SUM(CASE WHEN classification_effective = 'style' THEN 1 ELSE 0 END)::int AS style,
+              SUM(CASE WHEN classification_effective = 'refactor' THEN 1 ELSE 0 END)::int AS refactor,
+              SUM(CASE WHEN classification_effective = 'perf' THEN 1 ELSE 0 END)::int AS perf,
+              SUM(CASE WHEN classification_effective = 'test' THEN 1 ELSE 0 END)::int AS test,
+              SUM(CASE WHEN classification_effective = 'build' THEN 1 ELSE 0 END)::int AS build,
+              SUM(CASE WHEN classification_effective = 'ci' THEN 1 ELSE 0 END)::int AS ci,
+              SUM(CASE WHEN classification_effective = 'revert' THEN 1 ELSE 0 END)::int AS revert,
+              SUM(CASE WHEN classification_effective = 'chore' THEN 1 ELSE 0 END)::int AS chore,
+              SUM(CASE WHEN classification_effective = 'unknown' THEN 1 ELSE 0 END)::int AS unknown
+           FROM classified
            GROUP BY bucket
            ORDER BY bucket`,
-        [request.params.id],
-      );
+          [request.params.id],
+        );
 
       return result.rows;
     },

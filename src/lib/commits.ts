@@ -58,7 +58,11 @@ export async function insertCommits(
     await query(
       `INSERT INTO commits (repository_id, sha, author_name, author_email, committed_at, message, classification)
        VALUES ${values.join(",")}
-       ON CONFLICT DO NOTHING`,
+       ON CONFLICT (repository_id, sha)
+       DO UPDATE SET
+         classification = EXCLUDED.classification
+       WHERE commits.classification IN ('unknown', 'bugfix', 'feature', 'maintenance')
+         AND EXCLUDED.classification <> commits.classification`,
       params,
     );
   }
