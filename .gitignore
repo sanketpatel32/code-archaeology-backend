@@ -1,0 +1,85 @@
+# =========================
+# Dependencies
+# =========================
+node_modules/
+
+# Bun
+bun.lockb
+
+# =========================
+# Build & Output
+# =========================
+dist/
+out/
+build/
+*.tgz
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Testing & Coverage
+# =========================
+coverage/
+*.lcov
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# =========================
+# IDE & Editors
+# =========================
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# =========================
+# OS Generated
+# =========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =========================
+# TypeScript
+# =========================
+*.tsbuildinfo
+
+# =========================
+# Cache
+# =========================
+.eslintcache
+.cache
+
+# =========================
+# Docker
+# =========================
+.docker/
+
+# =========================
+# Misc
+# =========================
+*.pem
+*.key
+*.cert
+tmp/
+temp/
