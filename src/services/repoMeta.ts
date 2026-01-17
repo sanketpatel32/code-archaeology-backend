@@ -19,7 +19,7 @@ export function parseRepoUrl(repoUrl: string): RepoMeta {
 
   if (path.startsWith("git@")) {
     const match = path.match(/:(.+)$/);
-    path = match ? match[1] : path;
+    path = match ? (match[1] ?? path) : path;
   } else {
     try {
       const url = new URL(path);
@@ -32,8 +32,8 @@ export function parseRepoUrl(repoUrl: string): RepoMeta {
   path = path.replace(/^\/+/, "").replace(/\.git$/i, "");
   const parts = path.split("/").filter(Boolean);
 
-  const owner = parts.length > 1 ? parts[0] : "unknown";
-  const repo = parts.length > 1 ? parts[1] : (parts[0] ?? "repo");
+  const owner = parts.length > 1 ? (parts[0] ?? "unknown") : "unknown";
+  const repo = parts.length > 1 ? (parts[1] ?? "repo") : (parts[0] ?? "repo");
   const name = `${owner}/${repo}`;
   const slug = sanitizeSlug(`${owner}-${repo}`);
 

@@ -144,11 +144,11 @@ export async function getGitLogWithNumstat(
       const [sha, authorName, authorEmail, committedAt, message] =
         line.split("\x1f");
       current = {
-        sha,
-        authorName,
-        authorEmail,
-        committedAt,
-        message,
+        sha: sha ?? "",
+        authorName: authorName ?? "",
+        authorEmail: authorEmail ?? "",
+        committedAt: committedAt ?? "",
+        message: message ?? "",
         fileChanges: [],
       };
       continue;
@@ -163,8 +163,8 @@ export async function getGitLogWithNumstat(
       continue;
     }
 
-    const additionsRaw = parts[0];
-    const deletionsRaw = parts[1];
+    const additionsRaw = parts[0] ?? "";
+    const deletionsRaw = parts[1] ?? "";
     const filePath = parts.slice(2).join("\t");
 
     const additions =
