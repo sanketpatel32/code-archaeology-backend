@@ -1,8 +1,15 @@
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { query } from "../lib/db.js";
+import { ensureWorkdir, cloneOrFetchRepo, runCommand } from "../services/git.js";
+import { parseRepoUrl } from "../services/repoMeta.js";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
+const DEFAULT_BRANCHES = 6;
+const MAX_BRANCHES = 12;
+const DEFAULT_WEEKS = 24;
+const MAX_WEEKS = 104;
 
 function parseLimit(value: unknown, fallback = DEFAULT_LIMIT): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -17,6 +24,89 @@ function parseLimit(value: unknown, fallback = DEFAULT_LIMIT): number {
   }
 
   return fallback;
+}
+
+function parseBranchLimit(value: unknown): number {
+  return Math.min(parseLimit(value, DEFAULT_BRANCHES), MAX_BRANCHES);
+}
+
+function parseWeeks(value: unknown, fallback = DEFAULT_WEEKS): number {
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.floor(raw), 1), MAX_WEEKS);
+}
+
+function resolveWorkdir(): string {
+  return process.env.WORKDIR || "./.data";
+}
+
+function startOfWeekUtc(date: Date): Date {
+  const day = date.getUTCDay();
+  const diff = (day + 6) % 7;
+  const bucket = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+  bucket.setUTCDate(bucket.getUTCDate() - diff);
+  bucket.setUTCHours(0, 0, 0, 0);
+  return bucket;
+}
+
+function buildWeeklyBuckets(start: Date, end: Date): string[] {
+  const buckets: string[] = [];
+  const cursor = new Date(start);
+
+  while (cursor <= end) {
+    buckets.push(cursor.toISOString());
+    cursor.setUTCDate(cursor.getUTCDate() + 7);
+  }
+
+  return buckets;
+}
+
+async function getBranchCommitCounts(
+  repoPath: string,
+  branch: string,
+  sinceIso: string,
+): Promise<Map<string, number>> {
+  const output = await runCommand("git", [
+    "-C",
+    repoPath,
+    "log",
+    `origin/${branch}`,
+    "--date=iso-strict",
+    "--pretty=format:%ad",
+    `--since=${sinceIso}`,
+  ]);
+
+  const buckets = new Map<string, number>();
+  if (!output) {
+    return buckets;
+  }
+
+  const lines = output.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const committedAt = new Date(trimmed);
+    if (Number.isNaN(committedAt.getTime())) {
+      continue;
+    }
+    const bucket = startOfWeekUtc(committedAt).toISOString();
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+  }
+
+  return buckets;
 }
 
 export async function repositoryRoutes(app: FastifyInstance) {
@@ -165,6 +255,44 @@ export async function repositoryRoutes(app: FastifyInstance) {
          ORDER BY hotspot_score DESC
          LIMIT $2`,
         [request.params.id, limit],
+      );
+
+      return result.rows;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/commits",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest("DATABASE_URL must be set to read commits.");
+      }
+
+      const queryParams = request.query as {
+        limit?: string | number;
+        before?: string;
+      };
+
+      const limit = parseLimit(queryParams?.limit, 100);
+      const before = queryParams?.before?.trim()
+        ? new Date(queryParams.before)
+        : null;
+
+      const result = await query<{
+        sha: string;
+        author_name: string | null;
+        author_email: string | null;
+        committed_at: string;
+        message: string;
+        classification: string;
+      }>(
+        `SELECT sha, author_name, author_email, committed_at, message, classification
+         FROM commits
+         WHERE repository_id = $1
+           AND ($2::timestamptz IS NULL OR committed_at < $2)
+         ORDER BY committed_at DESC
+         LIMIT $3`,
+        [request.params.id, before ? before.toISOString() : null, limit],
       );
 
       return result.rows;
@@ -417,6 +545,161 @@ export async function repositoryRoutes(app: FastifyInstance) {
       );
 
       return result.rows;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/timeline-classification",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest(
+          "DATABASE_URL must be set to read classification timeline.",
+        );
+      }
+
+        const result = await query<{
+          bucket: string;
+          feat: number;
+          fix: number;
+          docs: number;
+          style: number;
+          refactor: number;
+          perf: number;
+          test: number;
+          build: number;
+          ci: number;
+          revert: number;
+          chore: number;
+          unknown: number;
+        }>(
+          `SELECT
+              date_trunc('week', committed_at) AS bucket,
+              SUM(CASE WHEN classification IN ('feat', 'feature') THEN 1 ELSE 0 END)::int AS feat,
+              SUM(CASE WHEN classification IN ('fix', 'bugfix') THEN 1 ELSE 0 END)::int AS fix,
+              SUM(CASE WHEN classification = 'docs' THEN 1 ELSE 0 END)::int AS docs,
+              SUM(CASE WHEN classification = 'style' THEN 1 ELSE 0 END)::int AS style,
+              SUM(CASE WHEN classification = 'refactor' THEN 1 ELSE 0 END)::int AS refactor,
+              SUM(CASE WHEN classification = 'perf' THEN 1 ELSE 0 END)::int AS perf,
+              SUM(CASE WHEN classification = 'test' THEN 1 ELSE 0 END)::int AS test,
+              SUM(CASE WHEN classification IN ('build', 'maintenance') THEN 1 ELSE 0 END)::int AS build,
+              SUM(CASE WHEN classification = 'ci' THEN 1 ELSE 0 END)::int AS ci,
+              SUM(CASE WHEN classification = 'revert' THEN 1 ELSE 0 END)::int AS revert,
+              SUM(CASE WHEN classification = 'chore' THEN 1 ELSE 0 END)::int AS chore,
+              SUM(CASE WHEN classification = 'unknown' THEN 1 ELSE 0 END)::int AS unknown
+           FROM commits
+           WHERE repository_id = $1
+           GROUP BY bucket
+           ORDER BY bucket`,
+        [request.params.id],
+      );
+
+      return result.rows;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/timeline-branches",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest(
+          "DATABASE_URL must be set to read branch timeline.",
+        );
+      }
+
+      const { id } = request.params;
+      const queryParams = request.query as {
+        limit?: string | number;
+        weeks?: string | number;
+      };
+
+      const limit = parseBranchLimit(queryParams?.limit);
+      const weeks = parseWeeks(queryParams?.weeks);
+
+      const repoResult = await query<{ url: string }>(
+        `SELECT url
+         FROM repositories
+         WHERE id = $1`,
+        [id],
+      );
+
+      const repoUrl = repoResult.rows[0]?.url;
+      if (!repoUrl) {
+        return reply.notFound("Repository not found.");
+      }
+
+      const workdir = resolveWorkdir();
+      await ensureWorkdir(workdir);
+
+      const meta = parseRepoUrl(repoUrl);
+      const repoPath = path.resolve(workdir, meta.slug);
+
+      await cloneOrFetchRepo(repoUrl, repoPath);
+
+      const branchSample = Math.min(limit * 3, 30);
+      const branchOutput = await runCommand("git", [
+        "-C",
+        repoPath,
+        "for-each-ref",
+        `--count=${branchSample}`,
+        "--sort=-committerdate",
+        "--format=%(refname:short)",
+        "refs/remotes/origin/*",
+      ]);
+
+      const branches = branchOutput
+        .split("\n")
+        .map((branch) => branch.trim())
+        .filter(Boolean)
+        .map((branch) => branch.replace(/^origin\//, ""))
+        .filter((branch) => branch && branch !== "HEAD" && branch !== "origin");
+
+      const endBucket = startOfWeekUtc(new Date());
+      const startBucket = new Date(endBucket);
+      startBucket.setUTCDate(startBucket.getUTCDate() - (weeks - 1) * 7);
+      const bucketKeys = buildWeeklyBuckets(startBucket, endBucket);
+
+      const branchRows: Array<{
+        name: string;
+        totalCommits: number;
+        weeks: Array<{ bucket: string; commit_count: number }>;
+      }> = [];
+
+      for (const branch of branches) {
+        const counts = await getBranchCommitCounts(
+          repoPath,
+          branch,
+          startBucket.toISOString(),
+        );
+        const weeksData = bucketKeys.map((bucket) => ({
+          bucket,
+          commit_count: counts.get(bucket) ?? 0,
+        }));
+        const totalCommits = weeksData.reduce(
+          (sum, row) => sum + row.commit_count,
+          0,
+        );
+
+        if (totalCommits > 0) {
+          branchRows.push({
+            name: branch,
+            totalCommits,
+            weeks: weeksData,
+          });
+        }
+      }
+
+      const sorted = branchRows
+        .sort((a, b) => b.totalCommits - a.totalCommits)
+        .slice(0, limit);
+
+      return {
+        range: {
+          start: bucketKeys[0] ?? startBucket.toISOString(),
+          end:
+            bucketKeys[bucketKeys.length - 1] ?? endBucket.toISOString(),
+        },
+        branches: sorted,
+      };
     },
   );
 }

@@ -52,7 +52,7 @@ export async function computeFileMetrics(
         fc.file_path,
         COUNT(*)::int AS touches,
         SUM(fc.additions + fc.deletions)::int AS churn,
-        SUM(CASE WHEN c.classification = 'bugfix' THEN 1 ELSE 0 END)::int AS bugfix_touches,
+        SUM(CASE WHEN c.classification IN ('fix', 'bugfix') THEN 1 ELSE 0 END)::int AS bugfix_touches,
         MAX(c.committed_at) AS last_touched_at
      FROM file_changes fc
      JOIN commits c ON c.id = fc.commit_id

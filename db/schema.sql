@@ -33,7 +33,7 @@ CREATE TABLE commits (
   committed_at timestamptz NOT NULL,
   message text NOT NULL,
   classification text NOT NULL DEFAULT 'unknown'
-    CHECK (classification IN ('bugfix', 'feature', 'refactor', 'maintenance', 'chore', 'unknown')),
+    CHECK (classification IN ('feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'build', 'ci', 'revert', 'chore', 'unknown')),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
