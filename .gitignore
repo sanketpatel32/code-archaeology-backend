@@ -83,3 +83,4 @@ Thumbs.db
 *.cert
 tmp/
 temp/
+.data/
