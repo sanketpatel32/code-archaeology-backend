@@ -1,78 +1,101 @@
-# 🏗️ System Architecture
+# 🏗️ Server Architecture
 
-Code Archaeology is built on a distributed architecture design to handle resource-intensive analysis tasks without blocking the main API.
+The Code Archaeology backend is a high-performance analysis engine designed to process Git repositories at scale. It uses a distributed job queue architecture to handle CPU-intensive tasks asynchronously.
+
+---
+
+## 📐 System Design
 
 ```mermaid
 graph TD
-    User[User / Client] -->|HTTP Request| API[Fastify API Server]
-    API -->|1. Enqueue Job| Redis[Redis Queue]
-    Redis -->|2. Process Job| Worker[Background Worker]
+    Client[Frontend / Client] -->|HTTP POST /api/analysis| API[Fastify Server]
     
-    subgraph "Worker Process"
-        Worker -->|3. Clone Repo| Git[Git System]
-        Worker -->|4. Parse AST| Parser[TypeScript/Babel Parser]
-        Worker -->|5. Compute Metrics| Engines[Analysis Engines]
+    subgraph "Job Orchestration"
+        API -->|1. Enqueue| BullMQ[BullMQ (Redis)]
+        BullMQ -->|2. Dispatch| Worker[Worker Process]
     end
     
-    Engines -->|6. Store Results| DB[(PostgreSQL Database)]
-    API -->|7. Query Results| DB
+    subgraph "Analysis Pipeline"
+        Worker -->|Step 1| Clone[Git Clone]
+        Worker -->|Step 2| Walk[Commit History Walk]
+        Worker -->|Step 3| Complex[AST Complexity Parser]
+        Worker -->|Step 4| Metrics[Hotspot & Churn Engine]
+        Worker -->|Step 5| Quality[SonarQube-style Scanner]
+    end
+    
+    subgraph "Persistence"
+        Worker -->|Write| DB[(PostgreSQL)]
+        API -->|Read| DB
+    end
 ```
 
-## 🧩 Components
+## 🧩 Core Components
 
-### 1. API Server (`server/src/index.ts`)
-- **Framework**: Fastify v5
-- **Role**: Handles HTTP requests, authentication, and job dispatching.
-- **Key Routes**:
-  - `POST /api/analysis`: Triggers a new analysis run.
-  - `GET /api/repositories/:id/*`: Retrieves analyzed data (hotspots, timeline, etc.).
-- **Security**: Implements Rate limiting (`@fastify/rate-limit`) and Helmet (`@fastify/helmet`).
+### 1. API Gateway (`src/index.ts`)
+- **Technology**: Fastify v5
+- **Responsibility**: 
+  - Validates incoming requests.
+  - Generates `runId` for tracking.
+  - Exposes REST endpoints for querying analysis results.
+- **Middleware**:
+  - `@fastify/rate-limit`: Prevents abuse (100 req/min).
+  - `@fastify/helmet`: Sets secure HTTP headers.
 
-### 2. Job Queue (BullMQ + Redis)
-- **Role**: Decouples the heavy lifting of code analysis from the HTTP layer.
-- **Flow**:
-  1. API receives a repository URL.
-  2. Creates a job in the `analysis` queue.
-  3. Returns a `runId` immediately to the client.
+### 2. Job Queue (`src/queue/analysis.ts`)
+We use **BullMQ** on top of Redis to decouple the HTTP request from the actual processing.
+- **Job Name**: `analyze`
+- **Data Payload**: `{ runId, repoUrl, branch, options }`
+- **Concurrency**: Scalable via adding more Worker instances (currently 1 per container).
 
-### 3. Background Worker (`server/worker.ts`)
-- **Role**: Consumes jobs from the queue and performs deep analysis.
-- **Process**:
-  1. **Clone**: Uses `git` to clone the target repository to a temporary workspace.
-  2. **History Walk**: Iterates through Git commits to build a timeline of changes.
-  3. **Complexity Analysis**: Parses source files to calculate Cyclomatic Complexity.
-  4. **Hotspot Detection**: Correlates file complexity with change frequency.
-  5. **Bus Factor**: Analyzes author contributions to identify key risk areas.
-  6. **Storage**: Saves all metrics to PostgreSQL.
+### 3. Analysis Pipeline (`src/services/analysis.ts`)
+The worker executes a strict sequence of engines. If any step fails, the job acts as a "Saga" and reports failure, but intermediate data may remain for debugging.
 
-### 4. Database (PostgreSQL)
-- **Schema**:
-  - `repositories`: Stores repo metadata.
-  - `analysis_runs`: Tracks status of analysis jobs.
-  - `commits`: Stores individual commit data.
-  - `file_metrics`: Stores complexity and churn data per file.
-  - `hotspots`: Aggregated hotspot data.
+| Step | Engine | Description |
+|------|--------|-------------|
+| 1. **Ingestion** | `ingestRepository` | Clones repo to `./.data` and iterates commits to build the `commits` table. |
+| 2. **File Metrics** | `computeFileMetrics` | Aggregates Lines Added/Deleted per file to calculate Churn vs. Velocity. |
+| 3. **Ownership** | `computeOwnership` | Calculates "Bus Factor" by analyzing author distribution per file. |
+| 4. **Complexity** | `computeComplexitySnapshots` | Parses source code (AST) at historical points to track debt trends. |
+| 5. **Insights** | `generateInsights` | Runs heuristics (e.g., "God Class detection") on the computed metrics. |
+| 6. **Quality** | `runQualityAnalysis` | Runs a static analysis pass (Sonar-like) on the *current* HEAD. |
 
-## 🔄 Data Flow
+### 4. Storage Layer (`src/db/schema.sql`)
+- **PostgreSQL**: Relational data store for all structured metrics.
+- **Repositories Table**: Single source of truth for a repo.
+- **AnalysisRuns Table**: Tracks the status (`queued` -> `running` -> `succeeded` / `failed`) and timings.
 
-1. **Ingestion**: User submits a repo URL.
-2. **Processing**: Worker clones the repo and walks the AST of every source file.
-3. **Aggregation**:
-   - **Churn**: Additions/deletions per file per commit.
-   - **Complexity**: Halstead metrics and Cyclomatic complexity.
-   - **Coupling**: Which files change together (temporal coupling).
-4. **Presentation**: Client polls for status and renders charts once complete.
+---
 
-## 🛠️ Key Technologies
+## 📂 Directory Structure
 
-- **Runtime**: [Bun](https://bun.sh) (for fast startup and TS support)
-- **Queue**: [BullMQ](https://docs.bullmq.io/)
-- **Analysis**: [TypeScript Compiler API](https://github.com/microsoft/TypeScript) (for AST parsing)
-- **Storage**: [Supabase](https://supabase.com) (PostgreSQL)
+```
+server/src/
+├── config/           # Environment variables (Zod schema)
+├── db/               # SQL Schema & Connection logic
+├── lib/              # Shared utilities (Git helpers, math)
+├── queue/            # BullMQ producer/consumer definitions
+├── routes/           # Fastify Route handlers
+│   ├── analysis.ts
+│   ├── health.ts
+│   └── repositories.ts
+└── services/         # Domain Logic (The Engines)
+    ├── analysis.ts   # Pipeline Orchestrator
+    ├── complexity.ts # Halstead/Cyclomatic Logic
+    ├── ingestion.ts  # Git Interop
+    ├── insights.ts   # Recommendation Engine
+    ├── metrics.ts    # SQL Aggregations
+    ├── ownership.ts  # Author Statistics
+    └── quality.ts    # AST Static Analysis
+```
 
-## 🐳 Deployment Architecture
+## 🚀 Scaling Strategy
 
-The system is containerized into two services:
+1.  **Horizontal Scaling**: The API and Worker are stateless. You can spin up 10 Workers to process 10 repositories in parallel.
+2.  **Resource Isolation**: Workers handle `git clone` and AST parsing, which are CPU/IO heavy. Isolate them from the API to ensure UI responsiveness.
+3.  **Redis Dependency**: Both API and Worker must share the same Redis instance to coordinate jobs.
 
-1. **API Service**: Exposes port 3001. Publicly accessible.
-2. **Worker Service**: No public ports. Connects to Redis/DB internally. Scalable independently based on load.
+## 🔐 Security
+
+-   **Input Validation**: Strict regex on Repository URLs to prevent command injection.
+-   **Isolation**: Each analysis runs in a temporary directory based on `runId` to prevent file collisions.
+-   **Privileges**: The Docker container runs as a non-root `appuser`.
