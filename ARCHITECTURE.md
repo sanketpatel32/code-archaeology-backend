@@ -11,7 +11,7 @@ graph TD
     Client[Frontend / Client] -->|HTTP POST /api/analysis| API[Fastify Server]
     
     subgraph "Job Orchestration"
-        API -->|1. Enqueue| BullMQ[BullMQ (Redis)]
+        API -->|1. Enqueue| BullMQ["BullMQ (Redis)"]
         BullMQ -->|2. Dispatch| Worker[Worker Process]
     end
     
