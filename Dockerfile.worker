@@ -1,0 +1,42 @@
+# ================================
+# Code Archaeology - Worker
+# Optimized for Northflank
+# ================================
+
+# Stage 1: Install dependencies
+FROM oven/bun:1 AS deps
+WORKDIR /app
+
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile
+
+# Stage 2: Production image
+FROM oven/bun:1-slim AS runner
+WORKDIR /app
+
+# Install git for repo cloning functionality (worker needs this)
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 appuser
+
+# Copy dependencies and source
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Create data directory with proper permissions
+RUN mkdir -p .data && chown -R appuser:nodejs .data
+
+# Switch to non-root user
+USER appuser
+
+ENV NODE_ENV=production
+
+# Worker doesn't expose HTTP port but needs to keep running
+# Health check for worker (just check if process is alive)
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
+    CMD pgrep -f "bun" > /dev/null || exit 1
+
+# Start the worker
+CMD ["bun", "run", "worker"]

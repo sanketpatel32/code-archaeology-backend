@@ -1,5 +1,7 @@
 import cors from "@fastify/cors";
 import env from "@fastify/env";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
 import Fastify from "fastify";
 import { envSchema, parseCorsOrigins } from "./config/env.js";
@@ -11,6 +13,17 @@ export async function buildApp() {
   await app.register(env, {
     schema: envSchema,
     dotenv: true,
+  });
+
+  // Security: HTTP headers
+  await app.register(helmet, {
+    contentSecurityPolicy: false, // Disable CSP for API-only server
+  });
+
+  // Security: Rate limiting (100 requests per minute per IP)
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: "1 minute",
   });
 
   const corsOrigins = parseCorsOrigins(app.config.CORS_ORIGIN);
@@ -25,3 +38,4 @@ export async function buildApp() {
 
   return app;
 }
+
