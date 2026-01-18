@@ -19,6 +19,7 @@ export const envSchema = {
     INSIGHTS_MAX_PER_CATEGORY: { type: "number", default: 5 },
     BUS_FACTOR_TOUCH_THRESHOLD: { type: "number", default: 10 },
     BUS_FACTOR_SHARE_THRESHOLD: { type: "number", default: 0.7 },
+    QUALITY_WORKER_URL: { type: "string", default: "" },
   },
 } as const;
 
@@ -40,6 +41,7 @@ export type EnvConfig = {
   INSIGHTS_MAX_PER_CATEGORY: number;
   BUS_FACTOR_TOUCH_THRESHOLD: number;
   BUS_FACTOR_SHARE_THRESHOLD: number;
+  QUALITY_WORKER_URL: string;
 };
 
 export function parseCorsOrigins(value: string): string[] {

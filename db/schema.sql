@@ -131,3 +131,48 @@ CREATE TABLE insights (
 
 CREATE INDEX insights_repository_id_idx ON insights(repository_id);
 CREATE INDEX insights_analysis_run_id_idx ON insights(analysis_run_id);
+
+CREATE TABLE quality_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  repository_id uuid NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
+  started_at timestamptz,
+  completed_at timestamptz,
+  files_analyzed integer NOT NULL DEFAULT 0,
+  lines_analyzed integer NOT NULL DEFAULT 0,
+  quality_grade text CHECK (quality_grade IN ('A', 'B', 'C', 'D', 'F')),
+  error_message text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE quality_findings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quality_run_id uuid NOT NULL REFERENCES quality_runs(id) ON DELETE CASCADE,
+  file_path text NOT NULL,
+  line_start integer NOT NULL,
+  line_end integer,
+  rule_id text NOT NULL,
+  severity text NOT NULL CHECK (severity IN ('info', 'warning', 'error')),
+  category text NOT NULL CHECK (category IN ('bug', 'security', 'code_smell', 'performance')),
+  message text NOT NULL,
+  language text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE quality_file_stats (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  quality_run_id uuid NOT NULL REFERENCES quality_runs(id) ON DELETE CASCADE,
+  file_path text NOT NULL,
+  language text,
+  lines_of_code integer,
+  findings_count integer NOT NULL DEFAULT 0,
+  bugs integer NOT NULL DEFAULT 0,
+  security_issues integer NOT NULL DEFAULT 0,
+  code_smells integer NOT NULL DEFAULT 0
+);
+
+CREATE INDEX quality_runs_repository_id_idx ON quality_runs(repository_id);
+CREATE INDEX quality_findings_run_id_idx ON quality_findings(quality_run_id);
+CREATE INDEX quality_findings_file_idx ON quality_findings(file_path);
+CREATE INDEX quality_file_stats_run_id_idx ON quality_file_stats(quality_run_id);

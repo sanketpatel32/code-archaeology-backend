@@ -4,6 +4,7 @@ import { ingestRepository } from "./ingestion.js";
 import { generateInsights } from "./insights.js";
 import { computeFileMetrics } from "./metrics.js";
 import { computeOwnership } from "./ownership.js";
+import { runQualityAnalysis } from "./quality.js";
 
 export type AnalysisInput = {
   repoUrl: string;
@@ -35,6 +36,18 @@ export async function runAnalysis(
   await computeComplexitySnapshots(ingestion.repositoryId, ingestion.repoPath);
   await generateInsights(ingestion.repositoryId, input.analysisRunId);
   await touchRepositoryAnalyzed(ingestion.repositoryId);
+  try {
+    await runQualityAnalysis(
+      ingestion.repositoryId,
+      ingestion.repoPath,
+      input.branch ?? ingestion.defaultBranch,
+    );
+  } catch (error) {
+    console.warn(
+      "Quality analysis skipped:",
+      error instanceof Error ? error.message : error,
+    );
+  }
 
   return {
     repositoryId: ingestion.repositoryId,

@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { query } from "../lib/db.js";
 import { ensureWorkdir, cloneOrFetchRepo, runCommand } from "../services/git.js";
 import { parseRepoUrl } from "../services/repoMeta.js";
+import { startQualityAnalysis } from "../services/quality.js";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
@@ -42,6 +43,21 @@ function parseLimit(value: unknown, fallback = DEFAULT_LIMIT): number {
   }
 
   return fallback;
+}
+
+function parseOffset(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(Math.floor(value), 0);
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isNaN(parsed)) {
+      return Math.max(parsed, 0);
+    }
+  }
+
+  return 0;
 }
 
 function parseBranchLimit(value: unknown): number {
@@ -88,6 +104,19 @@ function buildWeeklyBuckets(start: Date, end: Date): string[] {
   }
 
   return buckets;
+}
+
+async function getLatestQualityRunId(repositoryId: string) {
+  const result = await query<{ id: string }>(
+    `SELECT id
+     FROM quality_runs
+     WHERE repository_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [repositoryId],
+  );
+
+  return result.rows[0]?.id ?? null;
 }
 
 async function getBranchCommitCounts(
@@ -276,6 +305,302 @@ export async function repositoryRoutes(app: FastifyInstance) {
       );
 
       return result.rows;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/quality",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest("DATABASE_URL must be set to read quality.");
+      }
+
+      const repositoryId = request.params.id;
+      const runResult = await query<{
+        id: string;
+        status: string;
+        created_at: string;
+        started_at: string | null;
+        completed_at: string | null;
+        files_analyzed: number | null;
+        lines_analyzed: number | null;
+        quality_grade: string | null;
+        error_message: string | null;
+        duration_seconds: number | null;
+      }>(
+        `SELECT
+            id,
+            status,
+            created_at,
+            started_at,
+            completed_at,
+            files_analyzed,
+            lines_analyzed,
+            quality_grade,
+            error_message,
+            CASE
+              WHEN started_at IS NULL OR completed_at IS NULL THEN NULL
+              ELSE EXTRACT(EPOCH FROM (completed_at - started_at))::int
+            END AS duration_seconds
+         FROM quality_runs
+         WHERE repository_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [repositoryId],
+      );
+
+      const run = runResult.rows[0] ?? null;
+      if (!run) {
+        return {
+          run: null,
+          counts: {
+            total: 0,
+            bugs: 0,
+            security_issues: 0,
+            code_smells: 0,
+            performance: 0,
+            info: 0,
+            warning: 0,
+            error: 0,
+          },
+          languages: [],
+        };
+      }
+
+      const countsResult = await query<{
+        total: number;
+        bugs: number;
+        security_issues: number;
+        code_smells: number;
+        performance: number;
+        info: number;
+        warning: number;
+        error: number;
+      }>(
+        `SELECT
+            COUNT(*)::int AS total,
+            SUM(CASE WHEN category = 'bug' THEN 1 ELSE 0 END)::int AS bugs,
+            SUM(CASE WHEN category = 'security' THEN 1 ELSE 0 END)::int AS security_issues,
+            SUM(CASE WHEN category = 'code_smell' THEN 1 ELSE 0 END)::int AS code_smells,
+            SUM(CASE WHEN category = 'performance' THEN 1 ELSE 0 END)::int AS performance,
+            SUM(CASE WHEN severity = 'info' THEN 1 ELSE 0 END)::int AS info,
+            SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END)::int AS warning,
+            SUM(CASE WHEN severity = 'error' THEN 1 ELSE 0 END)::int AS error
+         FROM quality_findings
+         WHERE quality_run_id = $1`,
+        [run.id],
+      );
+
+      const languageResult = await query<{ language: string }>(
+        `SELECT DISTINCT language
+         FROM quality_findings
+         WHERE quality_run_id = $1
+           AND language IS NOT NULL
+         ORDER BY language`,
+        [run.id],
+      );
+
+      const severityMatrixResult = await query<{
+        category: string;
+        error: number;
+        warning: number;
+        info: number;
+      }>(
+        `SELECT
+            category,
+            SUM(CASE WHEN severity = 'error' THEN 1 ELSE 0 END)::int AS error,
+            SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END)::int AS warning,
+            SUM(CASE WHEN severity = 'info' THEN 1 ELSE 0 END)::int AS info
+         FROM quality_findings
+         WHERE quality_run_id = $1
+         GROUP BY category
+         ORDER BY category`,
+        [run.id],
+      );
+
+      const topRulesResult = await query<{
+        rule_id: string;
+        count: number;
+      }>(
+        `SELECT rule_id, COUNT(*)::int AS count
+         FROM quality_findings
+         WHERE quality_run_id = $1
+         GROUP BY rule_id
+         ORDER BY count DESC
+         LIMIT 8`,
+        [run.id],
+      );
+
+      const topFilesResult = await query<{
+        file_path: string;
+        language: string | null;
+        lines_of_code: number | null;
+        findings_count: number;
+        bugs: number;
+        security_issues: number;
+        code_smells: number;
+      }>(
+        `SELECT file_path, language, lines_of_code, findings_count, bugs, security_issues, code_smells
+         FROM quality_file_stats
+         WHERE quality_run_id = $1
+         ORDER BY findings_count DESC
+         LIMIT 8`,
+        [run.id],
+      );
+
+      return {
+        run,
+        counts: countsResult.rows[0],
+        languages: languageResult.rows.map((row) => row.language),
+        severity_matrix: severityMatrixResult.rows,
+        top_rules: topRulesResult.rows,
+        top_files: topFilesResult.rows,
+      };
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/quality/findings",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest("DATABASE_URL must be set to read findings.");
+      }
+
+      const repositoryId = request.params.id;
+      const runId = await getLatestQualityRunId(repositoryId);
+      if (!runId) {
+        return { findings: [] };
+      }
+
+      const queryParams = request.query as {
+        limit?: string | number;
+        offset?: string | number;
+        severity?: string;
+        category?: string;
+        file?: string;
+      };
+
+      const limit = parseLimit(queryParams?.limit, 120);
+      const offset = parseOffset(queryParams?.offset);
+      const severity = queryParams?.severity?.trim();
+      const category = queryParams?.category?.trim();
+      const file = queryParams?.file?.trim();
+
+      const conditions: string[] = ["quality_run_id = $1"];
+      const params: Array<string | number> = [runId];
+
+      if (severity) {
+        params.push(severity);
+        conditions.push(`severity = $${params.length}`);
+      }
+      if (category) {
+        params.push(category);
+        conditions.push(`category = $${params.length}`);
+      }
+      if (file) {
+        params.push(`%${file}%`);
+        conditions.push(`file_path ILIKE $${params.length}`);
+      }
+
+      params.push(limit);
+      params.push(offset);
+
+      const result = await query<{
+        file_path: string;
+        line_start: number;
+        line_end: number | null;
+        rule_id: string;
+        severity: string;
+        category: string;
+        message: string;
+        language: string | null;
+      }>(
+        `SELECT file_path, line_start, line_end, rule_id, severity, category, message, language
+         FROM quality_findings
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY severity DESC, category ASC, file_path ASC, line_start ASC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params,
+      );
+
+      return { findings: result.rows };
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repositories/:id/quality/files",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest("DATABASE_URL must be set to read file stats.");
+      }
+
+      const repositoryId = request.params.id;
+      const runId = await getLatestQualityRunId(repositoryId);
+      if (!runId) {
+        return { files: [] };
+      }
+
+      const limit = parseLimit(
+        (request.query as { limit?: string | number })?.limit,
+        20,
+      );
+
+      const result = await query<{
+        file_path: string;
+        language: string | null;
+        lines_of_code: number | null;
+        findings_count: number;
+        bugs: number;
+        security_issues: number;
+        code_smells: number;
+      }>(
+        `SELECT file_path, language, lines_of_code, findings_count, bugs, security_issues, code_smells
+         FROM quality_file_stats
+         WHERE quality_run_id = $1
+         ORDER BY findings_count DESC
+         LIMIT $2`,
+        [runId, limit],
+      );
+
+      return { files: result.rows };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/repositories/:id/quality/run",
+    async (request, reply) => {
+      if (!app.config.DATABASE_URL) {
+        return reply.badRequest("DATABASE_URL must be set to run quality scan.");
+      }
+
+      const repositoryId = request.params.id;
+      const repoResult = await query<{
+        url: string;
+        default_branch: string | null;
+      }>(
+        `SELECT url, default_branch
+         FROM repositories
+         WHERE id = $1`,
+        [repositoryId],
+      );
+
+      const repo = repoResult.rows[0];
+      if (!repo?.url) {
+        return reply.notFound("Repository not found.");
+      }
+
+      const body = request.body as { branch?: string | null } | undefined;
+      const branch =
+        typeof body?.branch === "string" && body.branch.trim()
+          ? body.branch.trim()
+          : repo.default_branch ?? null;
+
+      const result = await startQualityAnalysis(
+        repositoryId,
+        repo.url,
+        branch,
+      );
+      return result;
     },
   );
 
